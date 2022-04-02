@@ -1,0 +1,44 @@
+comentario = { "(" ~ (!")" ~ ANY)* ~ ")" }
+
+WHITESPACE = _{ " " | "\n" | comentario }
+coma = _{ "," }
+y_punto = _{ "y" }
+puntuacion = _{ "." | coma | y_punto }
+puntuacion_estricta = _{ "." | "," }
+
+programa = _{ "hola" ~ puntuacion ~ lista_sentencias ~ "adios" ~ puntuacion_estricta? }
+
+lista_sentencias = _{ sentencia* }
+
+peticion = _{
+    "porfavor" ~ puntuacion*
+        ~ lista_sentencias
+    ~ "gracias" ~ puntuacion_estricta }
+    
+sentencia = _{ sentencia_bloque | (sentencia_puntuada ~ puntuacion) }
+
+sentencia_puntuada = _{ baja | muestra | di | "" }
+sentencia_bloque = { peticion }
+
+mas = { "mas" }
+menos = { "menos" }
+expresion = _{ producto ~ ((mas|menos) ~ producto)* }
+
+por = { "por" }
+entre = { "entre" }
+producto = _{ literal_numerico ~ ((por|entre) ~ literal_numerico)* }
+
+literal_numerico = _{ numero | verdad }
+literal = _{ numero | verdad | texto }
+
+numero = { (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) | "0" }
+
+verdad = { "cierto" | "falso" }
+
+texto_contenido = @{ (!"\"" ~ ANY)* }
+
+texto = @{ "\"" ~ texto_contenido ~ "\"" }
+
+di = { "di" ~ texto }
+muestra = { "muestra" ~ expresion }
+baja = { "baja" }
