@@ -8,7 +8,7 @@ puntuacion_estricta = _{ "." | "," }
 
 programa = _{ "hola" ~ puntuacion ~ lista_sentencias ~ "adios" ~ puntuacion_estricta? }
 
-lista_sentencias = _{ sentencia* }
+lista_sentencias = { sentencia* }
 
 peticion = _{
     "porfavor" ~ puntuacion*
@@ -20,18 +20,16 @@ sentencia = _{ sentencia_bloque | (sentencia_puntuada ~ puntuacion) }
 sentencia_puntuada = _{ baja | muestra | di | "" }
 sentencia_bloque = { peticion }
 
-mas = { "mas" }
-menos = { "menos" }
-expresion = _{ producto ~ ((mas|menos) ~ producto)* }
+expr_op = { "mas" | "menos" }
+expresion = { producto ~ ( expr_op ~ producto)* }
 
-por = { "por" }
-entre = { "entre" }
-producto = _{ literal_numerico ~ ((por|entre) ~ literal_numerico)* }
+prod_op = { "por" | "entre" }
+producto = { literal_numerico ~ (prod_op ~ literal_numerico)* }
 
 literal_numerico = _{ numero | verdad }
 literal = _{ numero | verdad | texto }
 
-numero = { (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) | "0" }
+numero = @{ (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) | "0" }
 
 verdad = { "cierto" | "falso" }
 

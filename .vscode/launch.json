@@ -9,7 +9,9 @@
             "request": "launch",
             "name": "Debug",
             "cargo": {
-                "args": [ "run" ]
+                "args": [
+                    "run"
+                ]
             },
             "env": {
                 "RUST_BACKTRACE": "1"
