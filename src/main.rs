@@ -10,8 +10,8 @@ use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{FileType, InitializationConfig, Target, TargetMachine};
-use inkwell::types::FunctionType;
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
+use inkwell::types::{BasicMetadataTypeEnum, FunctionType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use inkwell::OptimizationLevel;
 use pest::iterators::Pair;
@@ -69,26 +69,92 @@ impl<'ctx> CodeGen<'ctx> {
                     self.from_ast(i);
                 }
             }
-            Di(texto) => {
-                let i32_type = self.context.i32_type();
-                let str_type = self.context.i8_type().ptr_type(AddressSpace::Generic);
-                let printf_type = i32_type.fn_type(
-                    &[inkwell::types::BasicMetadataTypeEnum::PointerType(str_type)],
-                    true,
-                );
-                let printf;
-                if let Some(fun) = self.module.get_function("printf") {
-                    printf = fun;
-                } else {
-                    let fun = self.module.add_function("printf", printf_type, None);
-                    printf = fun;
-                }
+            Di(texto) => self.decir(texto),
+            Muestra(nodo) => {
+                let value = self.construir_expresion(*nodo);
 
-                let value = self.context.metadata_string(texto.as_str());
+                let printf = self.generar_printf();
 
-                self.builder.build_call(printf, &[value.into()], "muestra");
+                let format_string = self.builder.build_global_string_ptr("%d", "format_string"); // No lo uso como format aún.
+
+                self.builder
+                    .build_call(
+                        printf,
+                        &[format_string.as_pointer_value().into(), value.into()],
+                        "muestra",
+                    )
+                    .try_as_basic_value()
+                    .expect_left("Invalid");
             }
             _ => {}
+        }
+    }
+
+    fn generar_printf(&mut self) -> FunctionValue<'ctx> {
+        if let Some(existing) = self.function_value("printf") {
+            existing
+        } else {
+            let f64_type = self.context.f64_type();
+            let str_type = self
+                .context
+                .i8_type()
+                .ptr_type(inkwell::AddressSpace::Generic);
+
+            let printf_args_type =
+                vec![inkwell::types::BasicMetadataTypeEnum::PointerType(str_type)];
+            let printf_type = f64_type.fn_type(printf_args_type.as_slice(), true);
+            self.module.add_function("printf", printf_type, None)
+        }
+    }
+
+    fn decir(&mut self, texto: String) {
+        let printf = self.generar_printf();
+
+        let format_string = self.builder.build_global_string_ptr("%s", "format_string"); // No lo uso como format aún.
+        let metadata_string = unsafe {
+            self.builder
+                .build_global_string(&texto, "valor")
+                .as_basic_value_enum()
+        };
+
+        self.builder
+            .build_call(
+                printf,
+                &[
+                    format_string.as_pointer_value().into(),
+                    metadata_string.into(),
+                ],
+                "di",
+            )
+            .try_as_basic_value()
+            .expect_left("Invalid");
+    }
+
+    fn construir_expresion(&mut self, node: cordial::Ast) -> BasicMetadataValueEnum<'ctx> {
+        match node {
+            cordial::Ast::OpBin(op, lhs, rhs) => {
+                let lhs = self.construir_expresion(*lhs).into_int_value();
+                let rhs = self.construir_expresion(*rhs).into_int_value();
+                let operator;
+                match op {
+                    cordial::Operator::Mas => {
+                        operator = self.builder.build_int_add(lhs, rhs, "tempadd");
+                    }
+                    cordial::Operator::Menos => {
+                        operator = self.builder.build_int_sub(lhs, rhs, "tempsub");
+                    }
+                    cordial::Operator::Por => {
+                        operator = self.builder.build_int_mul(lhs, rhs, "tempmul");
+                    }
+                    cordial::Operator::Entre => {
+                        operator = self.builder.build_int_signed_div(lhs, rhs, "tempdiv");
+                    }
+                }
+
+                operator.as_basic_value_enum().into()
+            }
+            cordial::Ast::Numero(num) => self.context.i64_type().const_int(num, false).into(),
+            _ => panic!("Expresion invalida! No genera un número."),
         }
     }
 }
@@ -182,13 +248,16 @@ fn build_tree(pair: Pair<cordial::Rule>) -> Result<Box<cordial::Ast>, String> {
         cordial::Rule::texto_contenido => todo!(),
         cordial::Rule::di => {
             let child = pair.into_inner().next().unwrap();
-            Ok(Box::new(Di(child.as_str().to_string())))
+            let str = child.as_str();
+            Ok(Box::new(Di(str[1..(str.len() - 1)]
+                .to_string()
+                .to_string())))
         }
         cordial::Rule::muestra => {
             let child = pair.into_inner().next().unwrap();
             Ok(Box::new(Muestra(build_tree(child)?)))
         }
-        cordial::Rule::baja => Ok(Box::new(Muestra(Box::new(Texto("\n".to_string()))))),
+        cordial::Rule::baja => Ok(Box::new(Di("\n".to_string()))),
         _ => Err(format!("Token inesperado: `{}`", pair.as_str())),
     }
 }
@@ -273,8 +342,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let path = "ejemplos/prueba.cord";
     let file_content = fs::read_to_string(path).unwrap();
-    let mut file = cordial::Parser::parse(cordial::Rule::programa, &file_content)
-        .expect("Error while parsing");
+    let mut file =
+        cordial::Parser::parse(cordial::Rule::programa, &file_content).expect("Error al procesar");
 
     let context = Context::create();
     let mut codegen = CodeGen::new("main", &context);
@@ -287,53 +356,62 @@ fn main() -> Result<(), Box<dyn Error>> {
             &default_triple,
             TargetMachine::get_host_cpu_name().to_str()?,
             TargetMachine::get_host_cpu_features().to_str()?,
-            OptimizationLevel::Default,
+            OptimizationLevel::None,
             inkwell::targets::RelocMode::Default,
             inkwell::targets::CodeModel::Default,
         )
-        .expect("Couldn't initialize the host machine");
-
-    let object_name = "./output.out";
-    let path = Path::new(object_name);
-    let result = machine.write_to_file(&codegen.module, FileType::Object, path);
-
-    match result {
-        Ok(_) => println!("Success!"),
-        Err(err) => println!("Error :(\n{}", err),
-    }
+        .expect("No se pudo inicializar la máquina objetivo");
 
     let tree = build_tree(file.next().unwrap())?;
 
     codegen.from_ast(tree);
     codegen.module.verify().expect("Modulo invalido");
 
+    let object_name = "./target/output.o";
+    let path = Path::new(object_name);
+    let result = machine.write_to_file(&codegen.module, FileType::Object, path);
+    match result {
+        Ok(_) => {}
+        Err(err) => println!("Error :(\n{}", err),
+    }
+
     // println!("Tree:\n{}", tree)
     // for token in file {
     //     let tree = build_tree(token);
     //     println!("{:?}", tree.unwrap())
     // }
-    let mut args = vec!["-o", "output", "-e", "_main"];
+    let mut args = vec!["-o", "target/output", "-e", "_main"];
     let mut program = vec![object_name];
     if machine.get_triple().to_string().contains("apple-darwin") {
         program.append(&mut vec![
             "-lSystem",
-            "-macosx_version_min",
-            "11.0",
             "-L",
             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib",
         ]);
     }
     program.append(&mut args);
 
+    println!("Linkning:\nld {}", program.join(" "));
     let mut linker = Command::new("ld");
     linker.args(program);
-    let output = linker.output().expect("Couldn't link file");
+    let output = linker
+        .output()
+        .expect("No se pudo hacer link en el archivo");
 
     if !output.stderr.is_empty() {
         println!("{}", String::from_utf8_lossy(&output.stderr));
     } else {
         println!("{}", String::from_utf8_lossy(&output.stdout));
     }
+
+    println!("Running:\n");
+    let mut run = Command::new("./target/output");
+    let output = run.output().expect("No se pudo correr el programa");
+    let stderr = output.stderr;
+    let stdout = output.stdout;
+
+    print!("{}", String::from_utf8_lossy(&stdout));
+    print!("{}", String::from_utf8_lossy(&stderr));
 
     Ok(())
 }
