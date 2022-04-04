@@ -5,6 +5,7 @@ extern crate pest_derive;
 extern crate inkwell;
 
 use core::panic;
+use std::borrow::Borrow;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -93,22 +94,7 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
             Di(texto) => self.decir(texto),
-            Muestra(nodo) => {
-                let value = self.construir_expresion(*nodo);
-
-                let printf = self.generar_printf();
-
-                let format_string = self.builder.build_global_string_ptr("%d", "format_string"); // No lo uso como format aún.
-
-                self.builder
-                    .build_call(
-                        printf,
-                        &[format_string.as_pointer_value().into(), value.into()],
-                        "muestra",
-                    )
-                    .try_as_basic_value()
-                    .expect_left("Invalid");
-            }
+            Muestra(nodo, is_bool) => self.mostrar(nodo, is_bool),
             Repetir(cuenta, cuerpo) => {
                 let counter_name = "loop_counter";
                 let start_alloca = self.create_entry_block_alloca(counter_name);
@@ -194,6 +180,38 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
+    fn mostrar(&mut self, nodo: Box<cordial::Ast>, is_bool: bool) {
+        let mut is_true = false;
+        // TODO: Soportar operaciones aparte de literales de verdad.
+        if let cordial::Ast::Verdad(v) = nodo.borrow() { is_true = *v; }
+        let value = self.construir_expresion(*nodo);
+
+        let printf = self.generar_printf();
+
+        let format_string = self.builder.build_global_string_ptr(if is_bool { "%s" } else { "%d" }, "format_string"); // No lo uso como format aún.
+
+        let meta: BasicMetadataValueEnum =
+            if is_bool {
+                let metadata_string = unsafe {
+                    self.builder
+                        .build_global_string(if is_true { "cierto" } else { "falso" }, "valor")
+                        .as_basic_value_enum()
+                };
+
+                metadata_string.into()
+            } else {
+                value.into()
+            };
+        self.builder
+            .build_call(
+                printf,
+                &[format_string.as_pointer_value().into(), meta],
+                "muestra",
+            )
+            .try_as_basic_value()
+            .expect_left("Invalid");
+    }
+
     fn decir(&mut self, texto: String) {
         let printf = self.generar_printf();
 
@@ -241,6 +259,7 @@ impl<'ctx> CodeGen<'ctx> {
                 operator.as_basic_value_enum().into()
             }
             cordial::Ast::Numero(num) => self.context.i64_type().const_int(num, false).into(),
+            cordial::Ast::Verdad(val) => self.context.i64_type().const_int(if val { 1 } else { 0 }, false).into(),
             _ => panic!("Expresion invalida! No genera un número."),
         }
     }
@@ -285,7 +304,8 @@ mod cordial {
         Programa(Box<Ast>),
         Numero(u64),
         Texto(String),
-        Muestra(Box<Ast>),
+        Verdad(bool),
+        Muestra(Box<Ast>, bool),
         Di(String),
         Bloque(Vec<Box<Ast>>),
         OpBin(Operator, Box<Ast>, Box<Ast>),
@@ -328,7 +348,7 @@ fn build_tree(pair: Pair<cordial::Rule>) -> Result<Box<cordial::Ast>, String> {
             // Se que es valido por las reglas de gramática
             Ok(Box::new(Numero(pair.as_str().parse().unwrap())))
         }
-        cordial::Rule::verdad => todo!(),
+        cordial::Rule::verdad => Ok(Box::new(Verdad(pair.as_str() == "cierto"))),
         cordial::Rule::texto => {
             // let child = pairs.into_inner().next().unwrap();
             let str = pair.as_str();
@@ -344,7 +364,10 @@ fn build_tree(pair: Pair<cordial::Rule>) -> Result<Box<cordial::Ast>, String> {
         }
         cordial::Rule::muestra => {
             let child = pair.into_inner().next().unwrap();
-            Ok(Box::new(Muestra(build_tree(child)?)))
+            let child_value = build_tree(child)?;
+            let mut is_bool = false;
+            if let Verdad(_) = *child_value { is_bool = true; }
+            Ok(Box::new(Muestra(child_value, is_bool)))
         }
         cordial::Rule::baja => Ok(Box::new(Di("\n".to_string()))),
         cordial::Rule::repite_veces => {

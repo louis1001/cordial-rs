@@ -1,5 +1,6 @@
 hola.
     repite 2 por 2 veces:
-        por favor, di "Funciona" y baja.
+        por favor,
+            di "Funciona " y muestra falso (solo soporta literales por ahora). baja.
         gracias.
 adios.
