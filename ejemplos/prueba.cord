@@ -1,4 +1,5 @@
-hola,
-    (muestra 30 mas 3 por 2,)
-    di "hola, mundo" y baja.
-adios
+hola.
+    repite 2 por 2 veces:
+        por favor, di "Funciona" y baja.
+        gracias.
+adios.

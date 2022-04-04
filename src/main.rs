@@ -4,16 +4,21 @@ extern crate pest_derive;
 
 extern crate inkwell;
 
+use core::panic;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::{Linkage, Module};
+use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::targets::{FileType, InitializationConfig, Target, TargetMachine};
-use inkwell::types::{BasicMetadataTypeEnum, FunctionType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
-use inkwell::AddressSpace;
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
+use inkwell::FloatPredicate::ONE;
+use inkwell::IntPredicate::EQ;
 use inkwell::OptimizationLevel;
+use inkwell::{AddressSpace, IntPredicate};
 use pest::iterators::Pair;
 use pest::Parser;
 use rand::distributions::Alphanumeric;
@@ -27,31 +32,19 @@ struct CodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
-    block: BasicBlock<'ctx>,
+    main: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
     fn new(named: &str, context: &'ctx Context) -> Self {
-        let module = context.create_module("main");
+        let module = context.create_module(named);
         let builder = context.create_builder();
-        let i64_type = context.i64_type();
-        let main_sign = i64_type.fn_type(&[], false);
-        let main_func = module.add_function("main", main_sign, None);
-        let block = context.append_basic_block(main_func, "entry");
-
-        match block.get_first_instruction() {
-            Some(first_instr) => builder.position_before(&first_instr),
-            None => builder.position_at_end(block),
-        }
-
-        let inst = builder.build_return(Some(&i64_type.const_zero()));
-        builder.position_before(&inst);
 
         CodeGen {
-            context: context,
+            context,
             module,
             builder,
-            block: block,
+            main: None,
         }
     }
 
@@ -60,13 +53,43 @@ impl<'ctx> CodeGen<'ctx> {
         self.module.get_function(named)
     }
 
-    fn from_ast(&mut self, node: Box<cordial::Ast>) {
+    /// Creates a new stack allocation instruction in the entry block of the function.
+    /// https://github.com/TheDan64/inkwell/blob/master/examples/kaleidoscope/main.rs#L863
+    fn create_entry_block_alloca(&self, name: &str) -> PointerValue<'ctx> {
+        let builder = self.context.create_builder();
+
+        let entry = self.main.unwrap().get_first_basic_block().unwrap();
+
+        match entry.get_first_instruction() {
+            Some(first_instr) => builder.position_before(&first_instr),
+            None => builder.position_at_end(entry),
+        }
+
+        builder.build_alloca(self.context.i64_type(), name)
+    }
+
+    fn generate_from_ast(&mut self, node: Box<cordial::Ast>) {
         use cordial::Ast::*;
         match *node {
-            Programa(contenido) => self.from_ast(contenido),
+            Programa(contenido) => {
+                let i64_type = self.context.i64_type();
+                let main_sign = i64_type.fn_type(&[], false);
+                let main_func = self.module.add_function("main", main_sign, None);
+                let block = self.context.append_basic_block(main_func, "entry");
+
+                self.builder.position_at_end(block);
+
+                self.main = Some(main_func);
+                self.generate_from_ast(contenido);
+
+                let block = self.main.unwrap().get_last_basic_block().unwrap();
+
+                self.builder.position_at_end(block);
+                self.builder.build_return(Some(&i64_type.const_zero()));
+            }
             Bloque(sentencias) => {
                 for i in sentencias {
-                    self.from_ast(i);
+                    self.generate_from_ast(i);
                 }
             }
             Di(texto) => self.decir(texto),
@@ -86,7 +109,71 @@ impl<'ctx> CodeGen<'ctx> {
                     .try_as_basic_value()
                     .expect_left("Invalid");
             }
-            _ => {}
+            Repetir(cuenta, cuerpo) => {
+                let counter_name = "loop_counter";
+                let start_alloca = self.create_entry_block_alloca(counter_name);
+                let cuenta = self.construir_expresion(*cuenta);
+
+                let start = self.context.i64_type().const_int(0, false);
+                self.builder.build_store(start_alloca, start);
+
+                let loop_block = self
+                    .context
+                    .append_basic_block(self.main.unwrap(), "repetir");
+
+                self.builder.build_unconditional_branch(loop_block); // main -> repetir
+                self.builder.position_at_end(loop_block);
+
+                let curr_var = self.builder.build_load(start_alloca, counter_name);
+
+                let end_cond = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SLT,
+                    curr_var.into_int_value(),
+                    cuenta.into_int_value(),
+                    "loop_compare",
+                );
+
+                let loop_body = self
+                    .context
+                    .append_basic_block(self.main.unwrap(), "cuerporepetir");
+                self.builder.position_at_end(loop_body);
+
+                self.generate_from_ast(cuerpo);
+
+                let step = self.context.i64_type().const_int(1, false);
+
+                let next_var =
+                    self.builder
+                        .build_int_add(curr_var.into_int_value(), step, "nextvar");
+
+                self.builder.build_store(start_alloca, next_var);
+
+                self.builder.build_unconditional_branch(loop_block);
+
+                let after_loop = self
+                    .context
+                    .append_basic_block(self.main.unwrap(), "luegorepetir");
+
+                // if loop_counter < cuenta|-> cuerpo_repetir
+                //                   else  |-> after_loop
+                self.builder.position_at_end(loop_block);
+                // let bool_temp = self.builder.build_unsigned_int_to_float(
+                //     end_cond,
+                //     self.context.f64_type(),
+                //     "booltemp",
+                // );
+                // let bool_cond = self.builder.build_float_compare(
+                //     ONE,
+                //     bool_temp,
+                //     self.context.f64_type().const_float(0.0),
+                //     "loopcond",
+                // );
+                self.builder
+                    .build_conditional_branch(end_cond, loop_body, after_loop);
+
+                self.builder.position_at_end(after_loop);
+            }
+            _ => todo!(),
         }
     }
 
@@ -186,6 +273,7 @@ mod cordial {
             }
         }
     }
+
     impl From<String> for Operator {
         fn from(op: String) -> Self {
             Self::from(op.as_str())
@@ -201,6 +289,7 @@ mod cordial {
         Di(String),
         Bloque(Vec<Box<Ast>>),
         OpBin(Operator, Box<Ast>, Box<Ast>),
+        Repetir(Box<Ast>, Box<Ast>),
         NoOp,
     }
 }
@@ -258,6 +347,14 @@ fn build_tree(pair: Pair<cordial::Rule>) -> Result<Box<cordial::Ast>, String> {
             Ok(Box::new(Muestra(build_tree(child)?)))
         }
         cordial::Rule::baja => Ok(Box::new(Di("\n".to_string()))),
+        cordial::Rule::repite_veces => {
+            let mut child = pair.into_inner();
+            let expr = build_tree(child.next().unwrap())?;
+
+            let body = build_tree(child.next().unwrap())?;
+
+            Ok(Box::new(Repetir(expr, body)))
+        }
         _ => Err(format!("Token inesperado: `{}`", pair.as_str())),
     }
 }
@@ -364,8 +461,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let tree = build_tree(file.next().unwrap())?;
 
-    codegen.from_ast(tree);
-    codegen.module.verify().expect("Modulo invalido");
+    codegen.generate_from_ast(tree);
+    if let Err(error) = codegen.module.verify() {
+        panic!("{}", error.to_string());
+    }
 
     let object_name = "./target/output.o";
     let path = Path::new(object_name);
@@ -391,7 +490,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     program.append(&mut args);
 
-    println!("Linkning:\nld {}", program.join(" "));
+    println!("Linking:\nld {}", program.join(" "));
     let mut linker = Command::new("ld");
     linker.args(program);
     let output = linker
@@ -404,7 +503,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
-    println!("Running:\n");
+    println!("Running:");
     let mut run = Command::new("./target/output");
     let output = run.output().expect("No se pudo correr el programa");
     let stderr = output.stderr;

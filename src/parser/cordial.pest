@@ -6,19 +6,21 @@ y_punto = _{ "y" }
 puntuacion = _{ "." | coma | y_punto }
 puntuacion_estricta = _{ "." | "," }
 
-programa = _{ "hola" ~ puntuacion ~ lista_sentencias ~ "adios" ~ puntuacion_estricta? }
+predicado = _{ ":" }
+
+programa = { "hola" ~ puntuacion ~ lista_sentencias ~ "adios" ~ puntuacion_estricta? }
 
 lista_sentencias = { sentencia* }
 
 peticion = _{
-    "porfavor" ~ puntuacion*
+    "por favor" ~ puntuacion*
         ~ lista_sentencias
     ~ "gracias" ~ puntuacion_estricta }
-    
+
 sentencia = _{ sentencia_bloque | (sentencia_puntuada ~ puntuacion) }
 
 sentencia_puntuada = _{ baja | muestra | di | "" }
-sentencia_bloque = { peticion }
+sentencia_bloque = _{ peticion | repite_veces }
 
 expr_op = { "mas" | "menos" }
 expresion = { producto ~ ( expr_op ~ producto)* }
@@ -40,3 +42,5 @@ texto = @{ "\"" ~ texto_contenido ~ "\"" }
 di = { "di" ~ texto }
 muestra = { "muestra" ~ expresion }
 baja = { "baja" }
+
+repite_veces = { "repite" ~ expresion ~ "veces" ~ predicado ~ sentencia }
